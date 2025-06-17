@@ -11,6 +11,12 @@ import os
 import copy
 import torch
 import torch.nn.functional as F
+from torch import nn
+from pyro_slam.autograd.function import TrackingTensor, map_transform
+from pyro_slam.utils.pysolvers import PCG
+from pyro_slam.utils.ba import rotate_quat
+
+from vggt.dependency.projection import project_3D_points_np
 
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
@@ -31,6 +37,7 @@ from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
 from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
 
+import pypose as pp
 
 # TODO: add support for masks
 # TODO: add iterative BA
@@ -39,6 +46,125 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 # TODO: test different camera types
 
 
+def prepare_pyro(
+    points3d,
+    extrinsics,
+    intrinsics,
+    tracks,
+    image_size,
+    masks=None,
+    max_reproj_error=None,
+    max_points3D_val=3000,
+    shared_camera=False,
+    camera_type="SIMPLE_PINHOLE",
+    extra_params=None,
+    min_inlier_per_frame=64,
+    points_rgb=None,
+):
+    """
+    Convert Batched NumPy Arrays to PyCOLMAP
+
+    Check https://github.com/colmap/pycolmap for more details about its format
+
+    NOTE that colmap expects images/cameras/points3D to be 1-indexed
+    so there is a +1 offset between colmap index and batch index
+
+
+    NOTE: different from VGGSfM, this function:
+    1. Use np instead of torch
+    2. Frame index and camera id starts from 1 rather than 0 (to fit the format of PyCOLMAP)
+    """
+    # points3d: Px3
+    # extrinsics: Nx3x4
+    # intrinsics: Nx3x3
+    # tracks: NxPx2
+    # masks: NxP
+    # image_size: 2, assume all the frames have been padded to the same size
+    # where N is the number of frames and P is the number of tracks
+
+    N, P, _ = tracks.shape
+    assert len(extrinsics) == N
+    assert len(intrinsics) == N
+    assert len(points3d) == P
+    assert image_size.shape[0] == 2
+
+    if max_reproj_error is not None:
+        projected_points_2d, projected_points_cam = project_3D_points_np(points3d, extrinsics, intrinsics)
+        projected_diff = np.linalg.norm(projected_points_2d - tracks, axis=-1)
+        projected_points_2d[projected_points_cam[:, -1] <= 0] = 1e6
+        reproj_mask = projected_diff < max_reproj_error
+
+    if masks is not None and reproj_mask is not None:
+        masks = np.logical_and(masks, reproj_mask)
+    elif masks is not None:
+        masks = masks
+    else:
+        masks = reproj_mask
+
+    assert masks is not None
+
+    if masks.sum(1).min() < min_inlier_per_frame:
+        print(f"Not enough inliers per frame, skip BA.")
+        return None, None
+
+    # Reconstruction object, following the format of PyCOLMAP/COLMAP
+    reconstruction = pycolmap.Reconstruction()
+
+    # filter out points with too few observations
+    inlier_num = masks.sum(0)
+    valid_mask = inlier_num >= 2  # a track is invalid if without two inliers
+    masks[:, ~valid_mask] = False
+
+    observations = tracks[masks]
+    observations = torch.tensor(observations, dtype=torch.float64, device='cuda')
+    keyframe_indices, landmark_indices = masks.nonzero()
+    assert len(keyframe_indices) == len(landmark_indices), "Keyframe and landmark indices must match in length"
+    assert len(keyframe_indices) == len(observations), "Observations length must match keyframe and landmark indices length"
+    keyframe_indices = torch.tensor(keyframe_indices, dtype=torch.int32, device='cuda')
+    landmark_indices = torch.tensor(landmark_indices, dtype=torch.int32, device='cuda')
+    unique_keyframe, camera_indices = torch.unique(keyframe_indices, sorted=True, return_inverse=True)
+    unique_landmark, point_indices = torch.unique(landmark_indices, sorted=True, return_inverse=True)
+    intrinsics = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
+    f = intrinsics.diagonal(dim1=-2, dim2=-1)
+    center = intrinsics[..., :2, 2]
+    cameras = pp.mat2SE3(torch.tensor(extrinsics, dtype=torch.float64, device='cuda'))
+    cameras = torch.cat([cameras, f], dim=-1)
+    cameras = cameras[unique_keyframe]
+    points = torch.tensor(points3d, dtype=torch.float64, device='cuda')[unique_landmark]
+
+    @map_transform
+    def reproject_simple_pinhole(points, camera_params, pp):
+        points_proj = rotate_quat(points, camera_params[..., :7])
+        points_proj = points_proj[..., :2] / points_proj[..., 2].unsqueeze(-1)  # add dimension for broadcasting
+        f = camera_params[..., -1].unsqueeze(-1)
+        points_proj = points_proj * f + pp
+        return points_proj
+    
+    class ReprojNonBatched(nn.Module):
+        def __init__(self, camera_params, points_3d):
+            super().__init__()
+            self.pose = nn.Parameter(TrackingTensor(camera_params))
+            self.points_3d = nn.Parameter(TrackingTensor(points_3d))
+            self.pose.trim_SE3_grad = True
+
+        def forward(self, points_2d, camera_indices, point_indices, center):
+            camera_params = self.pose
+            points_3d = self.points_3d
+
+            points_proj = reproject_simple_pinhole(points_3d[point_indices], camera_params[camera_indices], center[camera_indices])
+            loss = points_proj - points_2d
+            return loss
+        
+    from pyro_slam.optim import LM
+    input = {'points_2d': observations,
+             'camera_indices': camera_indices,
+             'point_indices': point_indices,
+             'center': center[unique_keyframe],}
+    strategy = pp.optim.strategy.TrustRegion(up=2.0, down=0.5**4)
+    model = ReprojNonBatched(cameras, points).to('cuda')
+    optimizer = LM(model, strategy=strategy, solver=PCG(), reject=10)
+    for idx in range(7):
+        loss = optimizer.step(input)
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
@@ -47,6 +173,9 @@ def parse_args():
     ######### BA parameters #########
     parser.add_argument(
         "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
+    )
+    parser.add_argument(
+        "--implementation", type=str, default="pycolmap", help="Implementation for reconstruction (pycolmap or pyro_slam)"
     )
     parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
@@ -93,6 +222,9 @@ def run_VGGT(model, images, dtype, resolution=518):
 def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
+    assert args.implementation in ["pycolmap", "pyro_slam"], "Invalid implementation specified"
+    if args.implementation == "pyro_slam":
+        assert args.shared_camera is False, "Shared camera is not supported in pyro_slam implementation"
 
     # Set seed for reproducibility
     np.random.seed(args.seed)
@@ -169,6 +301,20 @@ def demo_fn(args):
         intrinsic[:, :2, :] *= scale
         track_mask = pred_vis_scores > args.vis_thresh
 
+        if args.implementation == "pyro_slam":
+            # construct parameters
+            prepare_pyro(
+                points_3d,
+                extrinsic,
+                intrinsic,
+                pred_tracks,
+                image_size,
+                masks=track_mask,
+                max_reproj_error=args.max_reproj_error,
+                shared_camera=shared_camera,
+                camera_type=args.camera_type,
+                points_rgb=points_rgb,
+            )
         # TODO: radial distortion, iterative BA, masks
         reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
             points_3d,
