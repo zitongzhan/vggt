@@ -124,20 +124,20 @@ def prepare_pyro(
     landmark_indices = torch.tensor(landmark_indices, dtype=torch.int32, device='cuda')
     unique_keyframe, camera_indices = torch.unique(keyframe_indices, sorted=True, return_inverse=True)
     unique_landmark, point_indices = torch.unique(landmark_indices, sorted=True, return_inverse=True)
-    intrinsics = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
-    f = intrinsics.diagonal(dim1=-2, dim2=-1)
-    center = intrinsics[..., :2, 2]
+    intrinsics_ = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
+    f = intrinsics_.diagonal(dim1=-2, dim2=-1)
+    center = intrinsics_[..., :2, 2]
     cameras = pp.mat2SE3(torch.tensor(extrinsics, dtype=torch.float64, device='cuda'))
     cameras = torch.cat([cameras, f], dim=-1)
     cameras = cameras[unique_keyframe]
     points = torch.tensor(points3d, dtype=torch.float64, device='cuda')[unique_landmark]
 
     @map_transform
-    def reproject_simple_pinhole(points, camera_params, pp):
-        points_proj = rotate_quat(points, camera_params[..., :7])
+    def reproject_simple_pinhole(points, camera_params, center):
+        points_proj = rotate_quat(points, pp.SE3(camera_params[..., :7]))
         points_proj = points_proj[..., :2] / points_proj[..., 2].unsqueeze(-1)  # add dimension for broadcasting
-        f = camera_params[..., -1].unsqueeze(-1)
-        points_proj = points_proj * f + pp
+        f = camera_params[..., -3:-1]
+        points_proj = points_proj * f + center
         return points_proj
     
     class ReprojNonBatched(nn.Module):
@@ -165,6 +165,35 @@ def prepare_pyro(
     optimizer = LM(model, strategy=strategy, solver=PCG(), reject=10)
     for idx in range(7):
         loss = optimizer.step(input)
+    
+    # Apply optimization results back to input tensors in place
+    with torch.no_grad():
+        # Extract optimized camera parameters
+        optimized_cameras = model.pose.data  # Shape: [num_unique_keyframes, 8] (SE3 + focal)
+        optimized_points = model.points_3d.data  # Shape: [num_unique_landmarks, 3]
+        
+        # Update extrinsics: extract SE3 part and convert back to 3x4 matrix
+        optimized_se3 = optimized_cameras[:, :7]  # SE3 parameters
+        optimized_extrinsics_tensor = pp.SE3(optimized_se3).matrix()  # Convert to 4x4 matrices
+        optimized_extrinsics_3x4 = optimized_extrinsics_tensor[:, :3, :]  # Take 3x4 part
+        
+        # Map back to original extrinsics array using unique_keyframe indices
+        extrinsics_tensor = torch.tensor(extrinsics, dtype=torch.float64, device='cuda')
+        extrinsics_tensor[unique_keyframe] = optimized_extrinsics_3x4
+        extrinsics[:] = extrinsics_tensor.cpu().numpy()
+        
+        # Update intrinsics: extract focal lengths and update intrinsic matrices
+        optimized_focal = optimized_cameras[:, 7:]  # Focal length parameters (fx, fy)
+        intrinsics_tensor = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
+        # Update diagonal elements (fx, fy) with optimized focal lengths
+        intrinsics_tensor[unique_keyframe, 0, 0] = optimized_focal[:, 0]  # fx
+        intrinsics_tensor[unique_keyframe, 1, 1] = optimized_focal[:, 1]  # fy
+        intrinsics[:] = intrinsics_tensor.cpu().numpy()
+        
+        # Update points3d: map back using unique_landmark indices
+        points3d_tensor = torch.tensor(points3d, dtype=torch.float64, device='cuda')
+        points3d_tensor[unique_landmark] = optimized_points
+        points3d[:] = points3d_tensor.cpu().numpy()
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
