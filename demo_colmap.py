@@ -103,12 +103,10 @@ def prepare_pyro(
 
     assert masks is not None
 
-    if masks.sum(1).min() < min_inlier_per_frame:
-        print(f"Not enough inliers per frame, skip BA.")
-        return None, None
-
-    # Reconstruction object, following the format of PyCOLMAP/COLMAP
-    reconstruction = pycolmap.Reconstruction()
+    frames_insufficient = masks.sum(1) < min_inlier_per_frame
+    if frames_insufficient.sum() > 0:
+        print(f"{frames_insufficient.sum()} / {masks.shape[0]} frames not enough inliers per frame, skip BA.")
+    masks[masks.sum(1) < min_inlier_per_frame] = False
 
     # filter out points with too few observations
     inlier_num = masks.sum(0)
@@ -362,8 +360,9 @@ def demo_fn(args):
             raise ValueError("No reconstruction can be built with BA")
 
         # Bundle Adjustment
-        ba_options = pycolmap.BundleAdjustmentOptions()
-        pycolmap.bundle_adjustment(reconstruction, ba_options)
+        if not args.implementation == "pyro_slam":
+            ba_options = pycolmap.BundleAdjustmentOptions()
+            pycolmap.bundle_adjustment(reconstruction, ba_options)
 
         reconstruction_resolution = img_load_resolution
     else:
