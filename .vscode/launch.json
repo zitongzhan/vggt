@@ -12,10 +12,18 @@
             "program": "${workspaceFolder}/demo_colmap.py",
             "console": "integratedTerminal",
             "args": [
-                "--scene_dir", "examples/kitchen",
+                "--scene_dir", "${input:scene_dir}",
                 "--use_ba",
                 "--implementation", "pyro_slam",
             ]
         }
+    ],
+    "inputs": [
+        {
+            "id": "scene_dir",
+            "type": "promptString",
+            "description": "Path to the scene directory",
+            "default": "examples/kitchen"
+        },
     ]
 }
