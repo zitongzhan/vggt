@@ -118,6 +118,7 @@ def prepare_pyro(
     valid_mask = inlier_num >= 2  # a track is invalid if without two inliers
     masks[:, ~valid_mask] = False
 
+    vggt_reproj_error = (projected_points_2d - tracks)[masks]
     observations = tracks[masks]
     observations = torch.tensor(observations, dtype=torch.float64, device='cuda')
     keyframe_indices, landmark_indices = masks.nonzero() if type(masks) is np.ndarray else masks.nonzero(as_tuple=True)
@@ -131,30 +132,46 @@ def prepare_pyro(
     f = intrinsics_.diagonal(dim1=-2, dim2=-1)[..., :-1]
     center = intrinsics_[..., :2, 2]
     cameras = pp.mat2SE3(torch.tensor(extrinsics, dtype=torch.float64, device='cuda'))
-    cameras = torch.cat([cameras, f], dim=-1)
+    if not shared_camera:
+        cameras = torch.cat([cameras, f], dim=-1)
     cameras = cameras[unique_keyframe]
     points = torch.tensor(points3d, dtype=torch.float64, device='cuda')[unique_landmark]
 
     @map_transform
-    def reproject_simple_pinhole(points, camera_params, center):
+    def reproject_simple_pinhole(points, camera_params, center, shared_intr=None):
+        
         points_proj = rotate_quat(points, pp.SE3(camera_params[..., :7]))
         points_proj = points_proj[..., :2] / points_proj[..., 2].unsqueeze(-1)  # add dimension for broadcasting
-        f = camera_params[..., -3:-1]
+        if shared_intr is not None:
+            f = shared_intr[..., :2]
+        else:
+            f = camera_params[..., -2:]
         points_proj = points_proj * f + center
         return points_proj
     
     class ReprojNonBatched(nn.Module):
-        def __init__(self, camera_params, points_3d):
+        def __init__(self, camera_params, points_3d, shared_intr=None):
             super().__init__()
             self.pose = nn.Parameter(TrackingTensor(camera_params))
             self.points_3d = nn.Parameter(TrackingTensor(points_3d))
             self.pose.trim_SE3_grad = True
+            if shared_intr is not None:
+                self.shared_intr = nn.Parameter(TrackingTensor(shared_intr))
+                assert self.shared_intr.shape[0] == 1, "Shared intrinsics must be a single camera"
+            else:
+                self.shared_intr = None
 
         def forward(self, points_2d, camera_indices, point_indices, center):
             camera_params = self.pose
             points_3d = self.points_3d
 
-            points_proj = reproject_simple_pinhole(points_3d[point_indices], camera_params[camera_indices], center[camera_indices])
+            if self.shared_intr is not None:
+                indices = torch.zeros_like(camera_indices)
+                shared_intr = self.shared_intr[indices]
+            else:
+                shared_intr = None
+
+            points_proj = reproject_simple_pinhole(points_3d[point_indices], camera_params[camera_indices], center[camera_indices], shared_intr)
             loss = points_proj - points_2d
             return loss
         
@@ -164,7 +181,10 @@ def prepare_pyro(
              'point_indices': point_indices,
              'center': center[unique_keyframe],}
     strategy = pp.optim.strategy.TrustRegion(up=2.0, down=0.5**4)
-    model = ReprojNonBatched(cameras, points).to('cuda')
+    shared_intr = None
+    if shared_camera:
+        shared_intr = f[0:1]
+    model = ReprojNonBatched(cameras, points, shared_intr).to('cuda')
     optimizer = LM(model, strategy=strategy, solver=PCG(), reject=10)
     scheduler = pp.optim.scheduler.StopOnPlateau(optimizer, steps=40, patience=3, decreasing=1e-3, verbose=False)
     scheduler.optimize(input=input)
@@ -181,7 +201,10 @@ def prepare_pyro(
         optimized_extrinsics_3x4 = optimized_extrinsics_tensor[:, :3, :]  # Take 3x4 part
         
         # Map back to original extrinsics array using unique_keyframe indices
-        optimized_focal = optimized_cameras[:, 7:]  # Focal length parameters (fx, fy)
+        if shared_camera:
+            optimized_focal = model.shared_intr.data
+        else:
+            optimized_focal = optimized_cameras[:, 7:]  # Focal length parameters (fx, fy)
         if isinstance(extrinsics, np.ndarray):
             extrinsics_tensor = torch.tensor(extrinsics, dtype=torch.float64, device='cuda')
             extrinsics_tensor[unique_keyframe] = optimized_extrinsics_3x4
@@ -264,8 +287,6 @@ def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
     assert args.implementation in ["pycolmap", "pyro_slam"], "Invalid implementation specified"
-    if args.implementation == "pyro_slam":
-        assert args.shared_camera is False, "Shared camera is not supported in pyro_slam implementation"
 
     # Set seed for reproducibility
     np.random.seed(args.seed)
