@@ -16,7 +16,7 @@ from pyro_slam.autograd.function import TrackingTensor, map_transform
 from pyro_slam.utils.pysolvers import PCG
 from pyro_slam.utils.ba import rotate_quat
 
-from vggt.dependency.projection import project_3D_points_np
+from vggt.dependency.projection import project_3D_points_np, project_3D_points
 
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
@@ -89,13 +89,18 @@ def prepare_pyro(
     assert image_size.shape[0] == 2
 
     if max_reproj_error is not None:
-        projected_points_2d, projected_points_cam = project_3D_points_np(points3d, extrinsics, intrinsics)
-        projected_diff = np.linalg.norm(projected_points_2d - tracks, axis=-1)
+        if type(points3d) is np.ndarray:
+            projected_points_2d, projected_points_cam = project_3D_points_np(points3d, extrinsics, intrinsics)
+            projected_diff = np.linalg.norm(projected_points_2d - tracks, axis=-1)
+        elif type(points3d) is torch.Tensor:
+            projected_points_2d, projected_points_cam = project_3D_points(points3d, extrinsics, intrinsics)
+            projected_diff = torch.linalg.norm(projected_points_2d - tracks, dim=-1)
+        else:
+            raise TypeError("points3d must be either a numpy array or a torch tensor")
         projected_points_2d[projected_points_cam[:, -1] <= 0] = 1e6
         reproj_mask = projected_diff < max_reproj_error
-
     if masks is not None and reproj_mask is not None:
-        masks = np.logical_and(masks, reproj_mask)
+        masks = masks & reproj_mask
     elif masks is not None:
         masks = masks
     else:
@@ -115,7 +120,7 @@ def prepare_pyro(
 
     observations = tracks[masks]
     observations = torch.tensor(observations, dtype=torch.float64, device='cuda')
-    keyframe_indices, landmark_indices = masks.nonzero()
+    keyframe_indices, landmark_indices = masks.nonzero() if type(masks) is np.ndarray else masks.nonzero(as_tuple=True)
     assert len(keyframe_indices) == len(landmark_indices), "Keyframe and landmark indices must match in length"
     assert len(keyframe_indices) == len(observations), "Observations length must match keyframe and landmark indices length"
     keyframe_indices = torch.tensor(keyframe_indices, dtype=torch.int32, device='cuda')
@@ -123,7 +128,7 @@ def prepare_pyro(
     unique_keyframe, camera_indices = torch.unique(keyframe_indices, sorted=True, return_inverse=True)
     unique_landmark, point_indices = torch.unique(landmark_indices, sorted=True, return_inverse=True)
     intrinsics_ = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
-    f = intrinsics_.diagonal(dim1=-2, dim2=-1)
+    f = intrinsics_.diagonal(dim1=-2, dim2=-1)[..., :-1]
     center = intrinsics_[..., :2, 2]
     cameras = pp.mat2SE3(torch.tensor(extrinsics, dtype=torch.float64, device='cuda'))
     cameras = torch.cat([cameras, f], dim=-1)
@@ -161,8 +166,8 @@ def prepare_pyro(
     strategy = pp.optim.strategy.TrustRegion(up=2.0, down=0.5**4)
     model = ReprojNonBatched(cameras, points).to('cuda')
     optimizer = LM(model, strategy=strategy, solver=PCG(), reject=10)
-    for idx in range(7):
-        loss = optimizer.step(input)
+    scheduler = pp.optim.scheduler.StopOnPlateau(optimizer, steps=40, patience=3, decreasing=1e-3, verbose=False)
+    scheduler.optimize(input=input)
     
     # Apply optimization results back to input tensors in place
     with torch.no_grad():
@@ -176,22 +181,31 @@ def prepare_pyro(
         optimized_extrinsics_3x4 = optimized_extrinsics_tensor[:, :3, :]  # Take 3x4 part
         
         # Map back to original extrinsics array using unique_keyframe indices
-        extrinsics_tensor = torch.tensor(extrinsics, dtype=torch.float64, device='cuda')
-        extrinsics_tensor[unique_keyframe] = optimized_extrinsics_3x4
-        extrinsics[:] = extrinsics_tensor.cpu().numpy()
-        
-        # Update intrinsics: extract focal lengths and update intrinsic matrices
         optimized_focal = optimized_cameras[:, 7:]  # Focal length parameters (fx, fy)
-        intrinsics_tensor = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
-        # Update diagonal elements (fx, fy) with optimized focal lengths
-        intrinsics_tensor[unique_keyframe, 0, 0] = optimized_focal[:, 0]  # fx
-        intrinsics_tensor[unique_keyframe, 1, 1] = optimized_focal[:, 1]  # fy
-        intrinsics[:] = intrinsics_tensor.cpu().numpy()
-        
-        # Update points3d: map back using unique_landmark indices
-        points3d_tensor = torch.tensor(points3d, dtype=torch.float64, device='cuda')
-        points3d_tensor[unique_landmark] = optimized_points
-        points3d[:] = points3d_tensor.cpu().numpy()
+        if isinstance(extrinsics, np.ndarray):
+            extrinsics_tensor = torch.tensor(extrinsics, dtype=torch.float64, device='cuda')
+            extrinsics_tensor[unique_keyframe] = optimized_extrinsics_3x4
+            extrinsics[:] = extrinsics_tensor.cpu().numpy()
+            
+            # Update intrinsics: extract focal lengths and update intrinsic matrices
+            intrinsics_tensor = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
+            # Update diagonal elements (fx, fy) with optimized focal lengths
+            intrinsics_tensor[unique_keyframe, 0, 0] = optimized_focal[:, 0]  # fx
+            intrinsics_tensor[unique_keyframe, 1, 1] = optimized_focal[:, 1]  # fy
+            intrinsics[:] = intrinsics_tensor.cpu().numpy()
+            
+            # Update points3d: map back using unique_landmark indices
+            points3d_tensor = torch.tensor(points3d, dtype=torch.float64, device='cuda')
+            points3d_tensor[unique_landmark] = optimized_points
+            points3d[:] = points3d_tensor.cpu().numpy()
+        elif isinstance(extrinsics, torch.Tensor):
+            extrinsics[unique_keyframe] = optimized_extrinsics_3x4.to(extrinsics.dtype)
+            # Update intrinsics: extract focal lengths and update intrinsic matrices
+            intrinsics[unique_keyframe, 0, 0] = optimized_focal[:, 0].to(intrinsics.dtype)  # fx
+            intrinsics[unique_keyframe, 1, 1] = optimized_focal[:, 1].to(intrinsics.dtype)  # fy
+            # Update points3d: map back using unique_landmark indices
+            points3d[unique_landmark] = optimized_points.to(points3d.dtype)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
