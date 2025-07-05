@@ -130,6 +130,8 @@ def prepare_pyro(
     unique_landmark, point_indices = torch.unique(landmark_indices, sorted=True, return_inverse=True)
     intrinsics_ = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
     f = intrinsics_.diagonal(dim1=-2, dim2=-1)[..., :-1]
+    if camera_type == "SIMPLE_PINHOLE":
+        f = f.mean(-1, keepdim=True)  # Use mean focal length for shared camera
     center = intrinsics_[..., :2, 2]
     cameras = pp.mat2SE3(torch.tensor(extrinsics, dtype=torch.float64, device='cuda'))
     if not shared_camera:
@@ -143,9 +145,9 @@ def prepare_pyro(
         points_proj = rotate_quat(points, pp.SE3(camera_params[..., :7]))
         points_proj = points_proj[..., :2] / points_proj[..., 2].unsqueeze(-1)  # add dimension for broadcasting
         if shared_intr is not None:
-            f = shared_intr[..., :2]
+            f = shared_intr
         else:
-            f = camera_params[..., -2:]
+            f = camera_params[..., 7:]
         points_proj = points_proj * f + center
         return points_proj
     
@@ -183,7 +185,7 @@ def prepare_pyro(
     strategy = pp.optim.strategy.TrustRegion(up=2.0, down=0.5**4)
     shared_intr = None
     if shared_camera:
-        shared_intr = f[0:1]
+        shared_intr = f.mean(0, keepdim=True)
     model = ReprojNonBatched(cameras, points, shared_intr).to('cuda')
     optimizer = LM(model, strategy=strategy, solver=PCG(), reject=10)
     scheduler = pp.optim.scheduler.StopOnPlateau(optimizer, steps=40, patience=3, decreasing=1e-3, verbose=False)
@@ -214,7 +216,7 @@ def prepare_pyro(
             intrinsics_tensor = torch.tensor(intrinsics, dtype=torch.float64, device='cuda')
             # Update diagonal elements (fx, fy) with optimized focal lengths
             intrinsics_tensor[unique_keyframe, 0, 0] = optimized_focal[:, 0]  # fx
-            intrinsics_tensor[unique_keyframe, 1, 1] = optimized_focal[:, 1]  # fy
+            intrinsics_tensor[unique_keyframe, 1, 1] = optimized_focal[:, -1]  # fy
             intrinsics[:] = intrinsics_tensor.cpu().numpy()
             
             # Update points3d: map back using unique_landmark indices
@@ -225,7 +227,7 @@ def prepare_pyro(
             extrinsics[unique_keyframe] = optimized_extrinsics_3x4.to(extrinsics.dtype)
             # Update intrinsics: extract focal lengths and update intrinsic matrices
             intrinsics[unique_keyframe, 0, 0] = optimized_focal[:, 0].to(intrinsics.dtype)  # fx
-            intrinsics[unique_keyframe, 1, 1] = optimized_focal[:, 1].to(intrinsics.dtype)  # fy
+            intrinsics[unique_keyframe, 1, 1] = optimized_focal[:, -1].to(intrinsics.dtype)  # fy
             # Update points3d: map back using unique_landmark indices
             points3d[unique_landmark] = optimized_points.to(points3d.dtype)
 
