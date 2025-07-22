@@ -24,7 +24,7 @@ data:
       img_size: ${img_size}
       patch_size: ${patch_size}
       debug: True
-      repeat_batch: True
+      repeat_batch: False
     dataset:
       _target_: data.composed_dataset.ComposedDataset
       dataset_configs:
