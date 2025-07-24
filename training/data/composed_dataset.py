@@ -120,10 +120,6 @@ class ComposedDataset(Dataset, ABC):
         ids = torch.from_numpy(batch["ids"])    # Frame indices sampled from the original sequence
 
 
-        # Invalidate all points if first frame has no valid points
-        if point_masks.numel() > 0 and point_masks[0].sum() == 0:
-            point_masks[:] = False
-
         # --- Apply Color Augmentation (training mode only) ---
         if self.training and self.image_aug is not None:
             if self.cojitter and random.random() > self.cojitter_ratio:
