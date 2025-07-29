@@ -25,6 +25,11 @@
 ```
 
 ## Updates
+
+- [July 29, 2025] We’ve updated the license for VGGT to permit **commercial use**. All code in the repository is now under a commercial-use-friendly license. However, only the newly released checkpoint [**VGGT-1B-Commercial**](https://huggingface.co/facebook/VGGT-1B-Commercial) is licensed for commercial usage — the original checkpoint remains non-commercial. Full license details are available [here](https://github.com/facebookresearch/vggt/blob/main/LICENSE.txt).
+
+
+
 - [July 6, 2025] Training code is now available in the `training` folder, including an example to finetune VGGT on a custom dataset. 
 
 
@@ -281,3 +286,5 @@ Thanks to these great repositories: [PoseDiffusion](https://github.com/facebookr
 
 ## License
 See the [LICENSE](./LICENSE.txt) file for details about the license under which this code is made available.
+
+Please note that only this [model checkpoint](https://huggingface.co/facebook/VGGT-1B-Commercial) allows commercial usage. This new checkpoint achieves the same performance level (might be slightly better) as the original one, e.g., AUC@30: 90.37 vs. 89.98 on the Co3D dataset.
