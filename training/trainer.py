@@ -379,7 +379,7 @@ class Trainer:
         while self.epoch < self.max_epochs:
             set_seeds(self.seed_value + self.epoch * 100, self.max_epochs, self.distributed_rank)
             
-            dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
+            dataloader = self.train_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
             self.train_epoch(dataloader)
             
             # Save checkpoint after each training epoch
@@ -406,7 +406,7 @@ class Trainer:
             logging.info("No validation dataset configured. Skipping validation.")
             return
 
-        dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
+        dataloader = self.val_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
         self.val_epoch(dataloader)
         
         del dataloader
