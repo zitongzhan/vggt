@@ -10,6 +10,7 @@ This module provides functions for working with PyTorch's distributed
 training capabilities and ensuring reproducible data loading.
 """
 
+import os
 import torch
 import random
 import numpy as np
