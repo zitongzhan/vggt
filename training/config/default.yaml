@@ -23,7 +23,7 @@ data:
     common_config:
       img_size: ${img_size}
       patch_size: ${patch_size}
-      debug: True
+      debug: False
       repeat_batch: False
     dataset:
       _target_: data.composed_dataset.ComposedDataset
@@ -39,7 +39,7 @@ data:
     common_config:
       img_size: ${img_size}
       patch_size: ${patch_size}
-      debug: True
+      debug: False
     dataset:
       _target_: data.composed_dataset.ComposedDataset
       dataset_configs:
