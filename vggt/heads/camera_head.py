@@ -97,13 +97,13 @@ class CameraHead(nn.Module):
         Iteratively refine camera pose predictions.
 
         Args:
-            pose_tokens (torch.Tensor): Normalized camera tokens with shape [B, 1, C].
+            pose_tokens (torch.Tensor): Normalized camera tokens with shape [B, S, C].
             num_iterations (int): Number of refinement iterations.
 
         Returns:
             list: List of activated camera encodings from each iteration.
         """
-        B, S, C = pose_tokens.shape  # S is expected to be 1.
+        B, S, C = pose_tokens.shape
         pred_pose_enc = None
         pred_pose_enc_list = []
 
