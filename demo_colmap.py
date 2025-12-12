@@ -116,6 +116,8 @@ def prepare_pyro(
     # filter out points with too few observations
     inlier_num = masks.sum(0)
     valid_mask = inlier_num >= 2  # a track is invalid if without two inliers
+    point_inrange = (points3d < max_points3D_val).all(axis=-1) if type(points3d) is np.ndarray else (points3d < max_points3D_val).all(dim=-1)
+    valid_mask = valid_mask & point_inrange  # filter out points with too large coordinates
     masks[:, ~valid_mask] = False
 
     vggt_reproj_error = (projected_points_2d - tracks)[masks]
