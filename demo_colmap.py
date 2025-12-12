@@ -12,9 +12,9 @@ import copy
 import torch
 import torch.nn.functional as F
 from torch import nn
-from pyro_slam.autograd.function import TrackingTensor, map_transform
-from pyro_slam.utils.pysolvers import PCG
-from pyro_slam.utils.ba import rotate_quat
+from bae.autograd.function import TrackingTensor, map_transform
+from bae.utils.pysolvers import PCG
+from bae.utils.ba import rotate_quat
 
 from vggt.dependency.projection import project_3D_points_np, project_3D_points
 
@@ -46,7 +46,7 @@ import pypose as pp
 # TODO: test different camera types
 
 
-def prepare_pyro(
+def prepare_bae(
     points3d,
     extrinsics,
     intrinsics,
@@ -179,7 +179,7 @@ def prepare_pyro(
             loss = points_proj - points_2d
             return loss
         
-    from pyro_slam.optim import LM
+    from bae.optim import LM
     input = {'points_2d': observations,
              'camera_indices': camera_indices,
              'point_indices': point_indices,
@@ -243,7 +243,7 @@ def parse_args():
         "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
     )
     parser.add_argument(
-        "--implementation", type=str, default="pycolmap", help="Implementation for reconstruction (pycolmap or pyro_slam)"
+        "--implementation", type=str, default="pycolmap", help="Implementation for reconstruction (pycolmap or bae)"
     )
     parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
@@ -290,7 +290,7 @@ def run_VGGT(model, images, dtype, resolution=518):
 def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
-    assert args.implementation in ["pycolmap", "pyro_slam"], "Invalid implementation specified"
+    assert args.implementation in ["pycolmap", "bae"], "Invalid implementation specified"
 
     # Set seed for reproducibility
     np.random.seed(args.seed)
@@ -367,9 +367,9 @@ def demo_fn(args):
         intrinsic[:, :2, :] *= scale
         track_mask = pred_vis_scores > args.vis_thresh
 
-        if args.implementation == "pyro_slam":
+        if args.implementation == "bae":
             # construct parameters
-            prepare_pyro(
+            prepare_bae(
                 points_3d,
                 extrinsic,
                 intrinsic,
@@ -399,7 +399,7 @@ def demo_fn(args):
             raise ValueError("No reconstruction can be built with BA")
 
         # Bundle Adjustment
-        if not args.implementation == "pyro_slam":
+        if not args.implementation == "bae":
             ba_options = pycolmap.BundleAdjustmentOptions()
             pycolmap.bundle_adjustment(reconstruction, ba_options)
 
