@@ -15,6 +15,7 @@
                 "--scene_dir", "${input:scene_dir}",
                 "--use_ba",
                 "--implementation", "pyro_slam",
+                "--shared_camera", 
             ]
         }
     ],
