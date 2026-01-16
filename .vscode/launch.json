@@ -14,7 +14,7 @@
             "args": [
                 "--scene_dir", "${input:scene_dir}",
                 "--use_ba",
-                "--implementation", "pyro_slam",
+                "--implementation", "bae",
                 "--shared_camera", 
             ]
         }
